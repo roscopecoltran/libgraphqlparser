@@ -1,7 +1,54 @@
-CMAKE_MINIMUM_REQUIRED(VERSION 2.8)
-PROJECT(libgraphqlparser C CXX)
+cmake_minimum_required(VERSION 3.0)
 
-SET(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake" "${CMAKE_MODULE_PATH}")
+string(COMPARE NOTEQUAL "$ENV{TRAVIS_TAG}" "" travis_deploy)
+string(COMPARE EQUAL "$ENV{APPVEYOR_REPO_TAG}" "true" appveyor_deploy)
+
+if(travis_deploy)
+  set(version "$ENV{TRAVIS_TAG}")
+elseif(appveyor_deploy)
+  set(version "$ENV{APPVEYOR_REPO_TAG_NAME}")
+else()
+  set(version "v0.6.0")
+endif()
+
+string(REGEX REPLACE "^v" "" version "${version}")
+
+include("cmake/HunterGate.cmake")
+HunterGate(
+  URL "https://github.com/ruslo/hunter/archive/v0.18.18.tar.gz"
+  SHA1 "ae1f72b9e8779a58f763179c77f609c0587d26cd"
+  )
+
+PROJECT(libgraphqlparser VERSION ${version} LANGUAGES C CXX)
+
+list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+
+OPTION(test "Build tests." OFF)
+
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+
+set(is_android ${ANDROID}) # syntax compatibility
+string(COMPARE EQUAL "${CMAKE_OSX_SYSROOT}" "iphoneos" is_ios)
+string(COMPARE EQUAL "${CMAKE_SYSTEM_NAME}" "Linux" is_linux)
+string(COMPARE EQUAL "${CMAKE_GENERATOR}" "Xcode" is_xcode)
+
+# See: cmake/Hunter/config.cmake
+# First call to 'hunter_add_package' will contains read of Hunter/config.cmake
+# Next variables will be used:
+#   * is_ios
+#   * is_linux
+hunter_add_package(Sugar)
+include("${SUGAR_ROOT}/cmake/Sugar")
+include(sugar_include)
+
+if(is_xcode)
+  option(${PROJECT_NAME}_DISABLE_DSYM "Disable generation of dSYM information" ON)
+  if(${PROJECT_NAME}_DISABLE_DSYM)
+    set(CMAKE_XCODE_ATTRIBUTE_DEBUG_INFORMATION_FORMAT "dwarf")
+  endif()
+  set(CMAKE_CONFIGURATION_TYPES "Debug;Release;MinSizeRel;RelWithDebInfo" CACHE STRING "Configuration types")
+  set(CMAKE_XCODE_ATTRIBUTE_ENABLE_BITCODE NO)
+endif()
 
 INCLUDE(version)
 
@@ -31,7 +78,7 @@ FILE(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/c)
 INCLUDE_DIRECTORIES(${CMAKE_CURRENT_SOURCE_DIR})
 INCLUDE_DIRECTORIES(${CMAKE_CURRENT_BINARY_DIR})
 
-ADD_LIBRARY(graphqlparser SHARED
+set(graphqlparser_src
   JsonVisitor.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/Ast.h
   ${CMAKE_CURRENT_BINARY_DIR}/Ast.cpp
@@ -51,6 +98,11 @@ ADD_LIBRARY(graphqlparser SHARED
   lexer.cpp
   lexer.h
   GraphQLParser.cpp)
+
+
+ADD_LIBRARY(graphqlparser STATIC ${graphqlparser_src})
+ADD_LIBRARY(graphqlparser_s SHARED ${graphqlparser_src})
+set_target_properties(graphqlparser_s PROPERTIES OUTPUT_NAME graphqlparser)
 
 # Enable this and remove CMAKE_CXX_FLAGS fiddle above when we are able
 # to upgrade to CMake 2.8.12. Blocker seems to be Travis CI being on
@@ -85,11 +137,59 @@ GENERATE_AST_FILE(cxx_json_visitor_impl JsonVisitor.cpp.inc)
 
 ADD_SUBDIRECTORY(python)
 
-OPTION(test "Build tests." OFF)
+### Install ###
+set(generated_dir "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
-INSTALL(DIRECTORY c ${CMAKE_CURRENT_BINARY_DIR}/c DESTINATION include/graphqlparser
+set(config_install_dir "lib/cmake/${PROJECT_NAME}")
+set(include_install_dir "include")
+
+set(version_config "${generated_dir}/${PROJECT_NAME}ConfigVersion.cmake")
+set(project_config "${generated_dir}/${PROJECT_NAME}Config.cmake")
+set(targets_export_name "${PROJECT_NAME}Targets")
+set(namespace "${PROJECT_NAME}::")
+
+include(CMakePackageConfigHelpers)
+write_basic_package_version_file(
+    "${version_config}" COMPATIBILITY SameMajorVersion
+)
+
+# Note: use 'targets_export_name'
+configure_package_config_file(
+    "${PROJECT_SOURCE_DIR}/cmake/Config.cmake.in"
+    "${project_config}"
+     INSTALL_DESTINATION "${config_install_dir}"
+)
+
+install(
+    TARGETS graphqlparser graphqlparser_s dump_json_ast
+    EXPORT "${targets_export_name}"
+    LIBRARY DESTINATION "lib"
+    ARCHIVE DESTINATION "lib"
+    RUNTIME DESTINATION "bin"
+    INCLUDES DESTINATION "${include_install_dir}"
+    )
+
+install(
+  FILES "${project_config}" "${version_config}"
+  DESTINATION "${config_install_dir}"
+  )
+
+install(
+  EXPORT "${targets_export_name}"
+  NAMESPACE "${namespace}"
+  DESTINATION "${config_install_dir}"
+  )
+
+install(
+  DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/c
+  DESTINATION "${include_install_dir}/${PROJECT_NAME}" 
   FILES_MATCHING PATTERN "*.h"
-  PATTERN "build" EXCLUDE)
+  PATTERN "build" EXCLUDE
+  ) 
+
+#INSTALL(DIRECTORY c ${CMAKE_CURRENT_BINARY_DIR}/c DESTINATION include/graphqlparser
+#  FILES_MATCHING PATTERN "*.h"
+#  PATTERN "build" EXCLUDE)
 
 INSTALL(FILES
   ${CMAKE_CURRENT_BINARY_DIR}/Ast.h
@@ -103,9 +203,11 @@ INSTALL(FILES
   position.hh
   stack.hh
   syntaxdefs.h
-  DESTINATION include/graphqlparser)
-INSTALL(TARGETS graphqlparser
-  LIBRARY DESTINATION lib)
+  DESTINATION "${include_install_dir}/${PROJECT_NAME}"
+)
+
+#INSTALL(TARGETS graphqlparser
+#  LIBRARY DESTINATION lib)
 
 if (UNIX)
   # generate pkgconfig file
@@ -119,6 +221,7 @@ if (UNIX)
 endif()
 
 IF (test)
+
   ADD_SUBDIRECTORY(test)
 
   if(UNIX)
